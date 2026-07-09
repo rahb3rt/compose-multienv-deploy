@@ -1,0 +1,328 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Multi-Environment Compose Platform — Full Stack (Multi-Environment)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# All host ports are configurable via env vars so multiple environments
+# can run on the same host without port conflicts.
+#
+# Set COMPOSE_PROJECT_NAME to isolate networks, containers, and volumes:
+#   COMPOSE_PROJECT_NAME=staging podman compose up -d
+#
+# Or use deploy.sh which handles this automatically:
+#   ./deploy.sh --env staging
+
+networks:
+  default:
+    name: ${COMPOSE_PROJECT_NAME:-platform}
+
+volumes:
+  mysql-data:
+  minio-data:
+  monitoring-data:
+  deploy-logs:
+  monitoring-data:
+  deploy-logs:
+
+services:
+
+  # ─── Infrastructure ─────────────────────────────────────────────────────
+
+  mysql:
+    image: docker.io/library/mysql:8.0
+    networks: [default]
+    ports:
+      - "${PORT_MYSQL:-6603}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-platform}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u${DB_USER}", "-p${DB_PASSWORD}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  minio:
+    image: quay.io/minio/minio:latest
+    networks: [default]
+    ports:
+      - "${PORT_MINIO_API:-5003}:9000"
+      - "${PORT_MINIO_CONSOLE:-5004}:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-platform101}
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+  # ─── Services ────────────────────────────────────────────────────────────
+
+  mail:
+    build: ${REPOS_DIR:-.}/mail
+    networks: [default]
+    ports:
+      - "${PORT_MAIL:-5007}:5007"
+    environment:
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_PASS: ${GMAIL_PASS:-}
+      LOB_API_KEY: ${LOB_API_KEY:-}
+    restart: unless-stopped
+
+  payments:
+    build: ${REPOS_DIR:-.}/payments
+    networks: [default]
+    ports:
+      - "${PORT_VENMO:-5006}:5006"
+    restart: unless-stopped
+
+  extractor:
+    build: ${REPOS_DIR:-.}/extractor
+    networks: [default]
+    ports:
+      - "${PORT_EXTRACTOR:-5010}:5010"
+    environment:
+      MINIO_SECURE: "false"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    depends_on: [minio]
+    restart: unless-stopped
+
+  email:
+    build: ${REPOS_DIR:-.}/email
+    networks: [default]
+    ports:
+      - "${PORT_EMAIL:-5008}:5008"
+    environment:
+      PORT: "5008"
+      SESSION_SECRET: ${SESSION_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-https://email.example.com/oauth2callback}
+      GOOGLE_AUTH_URI: https://accounts.google.com/o/oauth2/auth
+      GOOGLE_TOKEN_URI: https://oauth2.googleapis.com/token
+      GOOGLE_CERT_URL: https://www.googleapis.com/oauth2/v1/certs
+      GOOGLE_PROJECT_ID: ${GOOGLE_PROJECT_ID}
+      CORS_ORIGIN: ${APP_ORIGIN:-https://app.example.com}
+      API_KEY: ${API_KEY}
+      NODE_ENV: production
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE:-platform}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  kiosk:
+    build: ${REPOS_DIR:-.}/kiosk
+    networks: [default]
+    ports:
+      - "${PORT_KIOSK:-5009}:5009"
+    environment:
+      PORT: "5009"
+      CORS_ORIGIN: ${APP_ORIGIN:-https://app.example.com}
+      NODE_ENV: production
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-platform}
+      MINIO_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-s3.example.com}
+      MINIO_SECURE: "true"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      NEXT_PUBLIC_RUM_ENABLED: "true"
+      RUM_MONITORING_URL: http://monitoring:5014/api/rum/ingest
+      RUM_INGEST_KEY: ${RUM_INGEST_KEY}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    build: ${REPOS_DIR:-.}/api
+    networks: [default]
+    ports:
+      - "${PORT_API:-5002}:5002"
+    environment:
+      EMAIL_SERVICE_URL: http://mail:5007
+      VENMO_SERVICE_URL: http://payments:5006
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      DB_HOST: mysql
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_USER: ${DB_USER}
+      DB_NAME: ${MYSQL_DATABASE:-platform}
+      DB_PORT: "3306"
+      SEAM_API_KEY: ${SEAM_API_KEY}
+      SEAM_WEBHOOK_SECRET: ${SEAM_WEBHOOK_SECRET}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      INTAKE_SERVICE_URL: http://extractor:5010
+      IMESSAGE_BRIDGE_URL: http://sms:8080
+      IMESSAGE_BRIDGE_API_KEY: ${IMESSAGE_BRIDGE_API_KEY}
+      APP_URL: ${APP_ORIGIN:-https://app.example.com}
+      PUBLIC_BASE_API_URL: ${API_ORIGIN:-https://api.example.com}
+      TELEMETRY_DEVICE_TOKEN: ${TELEMETRY_DEVICE_TOKEN:-platform}
+      META_APP_ID: ${META_APP_ID}
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_CONFIG_ID: ${META_CONFIG_ID:-}
+      APP_BASE_URL: ${APP_ORIGIN:-https://app.example.com}
+      META_REDIRECT_URI: ${API_ORIGIN:-https://api.example.com}/api/v2/social/oauth/meta/callback
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      MONITORING_APP_NAME: api
+      MONITORING_SERVICE_NAME: api
+      MONITORING_URL: http://monitoring:5014
+      MONITORING_INTERNAL_KEY: ${MONITORING_INTERNAL_KEY:-platform}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mail:
+        condition: service_started
+      payments:
+        condition: service_started
+      minio:
+        condition: service_started
+      extractor:
+        condition: service_started
+    restart: unless-stopped
+
+  sms:
+    build: ${REPOS_DIR:-.}/sms
+    networks: [default]
+    ports:
+      - "${PORT_SMS:-5013}:8080"
+    environment:
+      BRIDGE_HOST: 0.0.0.0
+      BRIDGE_PORT: "8080"
+      LOG_LEVEL: INFO
+      INTERNAL_API_KEY: ${IMESSAGE_BRIDGE_API_KEY}
+      BLUEBUBBLES_BASE_URL: ${BLUEBUBBLES_BASE_URL}
+      BLUEBUBBLES_PASSWORD: ${BLUEBUBBLES_PASSWORD}
+      BLUEBUBBLES_SEND_METHOD: private-api
+      CRM_INGEST_URL: http://api:5002/api/v2/messages/ingest
+      CRM_INGEST_API_KEY: ${CRM_INGEST_API_KEY:-}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: crm-attachments
+      MINIO_REGION: us-east-1
+      MINIO_USE_SSL: "false"
+    depends_on: [api, minio]
+    restart: unless-stopped
+
+  app:
+    build: ${REPOS_DIR:-.}/next-app
+    networks: [default]
+    ports:
+      - "${PORT_APP:-3000}:3000"
+    environment:
+      EMAIL_SERVICE_URL: http://mail:5007
+      NEXT_PUBLIC_EMAIL_API: ${EMAIL_ORIGIN:-https://email.example.com}
+      NEXT_PUBLIC_API_KEY: ${API_KEY}
+      INTAKE_SERVICE_URL: http://extractor:5010
+      VENMO_SERVICE_URL: http://payments:5006
+      HEALTH_API: http://health:5011
+      NEXT_PUBLIC_RUM_ENABLED: "true"
+      RUM_MONITORING_URL: http://monitoring:5014/api/rum/ingest
+      RUM_INGEST_KEY: ${RUM_INGEST_KEY:-platform}
+      MONITORING_AUDIT_URL: http://monitoring:5014/api/audit/ingest
+      MONITORING_INTERNAL_KEY: ${MONITORING_INTERNAL_KEY:-platform}
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET_NAME: receipts
+      NEXT_PUBLIC_API_BASE_URL: ${API_ORIGIN:-https://api.example.com}
+      NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-platform}
+    depends_on: [mail, payments, extractor]
+    restart: unless-stopped
+
+  web:
+    build: ${REPOS_DIR:-.}/web
+    networks: [default]
+    ports:
+      - "${PORT_WEB:-5015}:5015"
+    environment:
+      PORT: "5015"
+      NODE_ENV: production
+      API_BASE_URL: http://api:5002
+      ADMIN_USERNAME: ${WEB_ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${WEB_ADMIN_PASSWORD:-changeme}
+      SESSION_SECRET: ${WEB_SESSION_SECRET:-${SESSION_SECRET}}
+      RUM_MONITORING_URL: http://monitoring:5014/api/rum/ingest
+      RUM_INGEST_KEY: ${RUM_INGEST_KEY}
+    depends_on: [api]
+    restart: unless-stopped
+
+  health:
+    build: ${REPOS_DIR:-.}/health
+    networks: [default]
+    ports:
+      - "${PORT_HEALTH:-5011}:5011"
+    user: "0:0"
+    environment:
+      AUTO_DISCOVER: "1"
+      DISCOVERY_ALLOW_CLI: "0"
+      DOCKER_HOST: unix://${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}
+      PREFERRED_NETWORK: ${COMPOSE_PROJECT_NAME:-platform}
+      HEALTH_CONFIG: ""
+      MYSQL_HEALTH_USER: ${MYSQL_HEALTH_USER}
+      MYSQL_HEALTH_PASSWORD: ${MYSQL_HEALTH_PASSWORD}
+    volumes:
+      - ${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}:${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}:ro
+    restart: unless-stopped
+
+  monitoring:
+    build: ${REPOS_DIR:-.}/monitoring
+    networks: [default]
+    ports:
+      - "${PORT_MONITORING:-5014}:5014"
+    environment:
+      PORT: "5014"
+      MONITORING_USER: ${MONITORING_USER:-admin}
+      MONITORING_PASS: ${MONITORING_PASS}
+      RUM_INGEST_KEY: ${RUM_INGEST_KEY}
+      DOCKER_HOST: unix://${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}
+      PODMAN_NETWORK: ${COMPOSE_PROJECT_NAME:-platform}
+      MONITORING_SESSION_SECRET: ${MONITORING_INTERNAL_KEY:-platform}
+      MONITORING_INTERNAL_KEY: ${MONITORING_INTERNAL_KEY:-platform}
+      HEALTH_API: http://health:5011
+    volumes:
+      - ${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}:${PODMAN_SOCK:-/run/user/1000/podman/podman.sock}:ro
+      - monitoring-data:/app/data
+      - deploy-logs:/app/deploy-logs:ro
+    depends_on: [health]
+    restart: unless-stopped
+
+  nginx:
+    image: docker.io/library/nginx:alpine
+    networks: [default]
+    ports:
+      - "${PORT_HTTP:-80}:80"
+      - "${PORT_HTTPS:-443}:443"
+      - "${PORT_HEALTH_HTTP:-8080}:8080"
+    volumes:
+      - ${NGINX_DIR:-./nginx}/default:/etc/nginx/conf.d/default.conf:ro
+      - ${NGINX_DIR:-./nginx}/certificate.pem:/etc/nginx/ssl/certificate.pem:ro
+      - ${NGINX_DIR:-./nginx}/key.pem:/etc/nginx/ssl/key.pem:ro
+      - ${NGINX_DIR:-./nginx}/nomaderealty.pem:/etc/nginx/ssl/nomaderealty.pem:ro
+      - ${NGINX_DIR:-./nginx}/nomaderealty-key.pem:/etc/nginx/ssl/nomaderealty-key.pem:ro
+      - ${NGINX_DIR:-./nginx}/supnewhaven.pem:/etc/nginx/ssl/supnewhaven.pem:ro
+      - ${NGINX_DIR:-./nginx}/supnewhaven-key.pem:/etc/nginx/ssl/supnewhaven-key.pem:ro
+      - ${NGINX_DIR:-./nginx}/html:/var/www/html:ro
+    depends_on: [app, api, email, kiosk, extractor, monitoring, minio]
+    restart: unless-stopped
